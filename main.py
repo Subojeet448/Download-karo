@@ -667,6 +667,7 @@ HTML_PAGE = """<!DOCTYPE html>
 async def root():
     return HTMLResponse(content=HTML_PAGE)
 
+
 if __name__ == "__main__":
     import uvicorn
     import os
