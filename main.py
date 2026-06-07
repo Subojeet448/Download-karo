@@ -184,49 +184,6 @@ async def download_video(
     return StreamingResponse(iter_file(), media_type=media_type, headers=headers)
 
 
-# ── /stream — serve file inline for browser playback ─────────────────────────
-@app.get("/stream")
-async def stream_video(
-    url: str     = Query(..., description="Video URL"),
-    quality: str = Query("720", description="Quality"),
-):
-    """Stream video/audio inline for in-browser playback (no forced download)."""
-    loop = asyncio.get_event_loop()
-    tmp_dir = tempfile.mkdtemp(prefix="strm_")
-    try:
-        filepath, err, title, _ = await loop.run_in_executor(
-            None, _blocking_download, url, tmp_dir, quality
-        )
-    except Exception as e:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-    if err or not filepath:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise HTTPException(status_code=400, detail=f"Stream failed: {err}")
-
-    path_obj  = Path(filepath)
-    file_size = path_obj.stat().st_size
-    ext       = path_obj.suffix.lstrip(".")
-
-    media_type = "audio/mpeg" if ext == "mp3" else "video/mp4"
-
-    def iter_file():
-        try:
-            with open(filepath, "rb") as f:
-                while chunk := f.read(1024 * 1024):
-                    yield chunk
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    headers = {
-        "Content-Length": str(file_size),
-        "Accept-Ranges":  "bytes",
-        "Cache-Control":  "no-store",
-    }
-    return StreamingResponse(iter_file(), media_type=media_type, headers=headers)
-
-
 def _blocking_download(url: str, download_dir: str, quality: str):
     """Blocking yt-dlp download — runs in thread pool."""
     extract_audio = (quality == "audio")
@@ -464,19 +421,9 @@ HTML_PAGE = """<!DOCTYPE html>
     transition:all .2s;
     position:relative;overflow:hidden;
   }
-  /* PINK hover for video quality buttons */
-  .qbtn:hover{
-    border-color:var(--accent);
-    color:var(--accent);
-    background:rgba(255,60,120,.08);
-    transform:translateY(-2px);
-  }
+  .qbtn:hover{border-color:var(--accent2);color:var(--accent2);transform:translateY(-2px)}
   .qbtn.audio{border-color:var(--gold);color:var(--gold)}
-  .qbtn.audio:hover{
-    background:rgba(255,209,102,.08);
-    border-color:var(--gold);
-    color:var(--gold);
-  }
+  .qbtn.audio:hover{background:rgba(255,209,102,.08)}
   .qbtn .size{
     display:block;font-size:10px;
     color:var(--muted);margin-top:3px;
@@ -517,105 +464,9 @@ HTML_PAGE = """<!DOCTYPE html>
   }
   @keyframes spin{to{transform:rotate(360deg)}}
 
-  /* ── VIDEO PLAYER MODAL ── */
-  #playerModal{
-    display:none;
-    position:fixed;inset:0;z-index:1000;
-    background:rgba(0,0,0,.88);
-    backdrop-filter:blur(8px);
-    align-items:center;justify-content:center;
-    animation:fadeIn .2s ease;
-  }
-  #playerModal.open{display:flex}
-  @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-
-  .modal-inner{
-    position:relative;
-    width:min(92vw,860px);
-    background:var(--card);
-    border:1px solid var(--border);
-    border-radius:18px;
-    overflow:hidden;
-    box-shadow:0 32px 80px rgba(0,0,0,.7);
-    animation:scaleUp .25s ease;
-  }
-  @keyframes scaleUp{from{transform:scale(.94);opacity:0}to{transform:scale(1);opacity:1}}
-
-  .modal-header{
-    display:flex;align-items:center;justify-content:space-between;
-    padding:14px 18px;
-    border-bottom:1px solid var(--border);
-  }
-  .modal-title{
-    font-family:'DM Sans',sans-serif;
-    font-size:14px;font-weight:600;
-    color:var(--text);
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-    max-width:calc(100% - 120px);
-  }
-  .modal-actions{display:flex;gap:8px;align-items:center;flex-shrink:0}
-
-  /* PINK download button inside modal */
-  .modal-dl-btn{
-    background:linear-gradient(135deg,var(--accent),#c0254d);
-    border:none;border-radius:8px;
-    color:#fff;font-family:'DM Sans',sans-serif;
-    font-weight:600;font-size:12px;
-    padding:7px 14px;cursor:pointer;
-    transition:opacity .2s,transform .15s;
-    white-space:nowrap;
-  }
-  .modal-dl-btn:hover{opacity:.9;transform:translateY(-1px)}
-
-  .modal-close{
-    background:var(--surface);
-    border:1px solid var(--border);
-    border-radius:8px;
-    color:var(--muted);
-    font-size:18px;line-height:1;
-    width:32px;height:32px;
-    cursor:pointer;
-    display:flex;align-items:center;justify-content:center;
-    transition:color .2s,border-color .2s;
-    flex-shrink:0;
-  }
-  .modal-close:hover{color:var(--text);border-color:var(--accent)}
-
-  .modal-video-wrap{
-    background:#000;
-    display:flex;align-items:center;justify-content:center;
-  }
-  #modalVideo{
-    width:100%;
-    max-height:70vh;
-    display:block;
-    outline:none;
-  }
-  #modalAudio{
-    width:100%;
-    padding:20px;
-    display:block;
-  }
-
-  .modal-loading{
-    display:flex;flex-direction:column;
-    align-items:center;justify-content:center;
-    padding:60px 20px;gap:14px;
-    color:var(--muted);
-    font-family:'DM Mono',monospace;font-size:13px;
-  }
-  .modal-loading .big-spin{
-    width:36px;height:36px;
-    border:3px solid rgba(255,60,120,.2);
-    border-top-color:var(--accent);
-    border-radius:50%;
-    animation:spin .8s linear infinite;
-  }
-
   @media(max-width:480px){
     .quality-grid{grid-template-columns:repeat(3,1fr)}
     .thumb-wrap img{height:160px}
-    #modalVideo{max-height:55vw}
   }
 </style>
 </head>
@@ -634,7 +485,7 @@ HTML_PAGE = """<!DOCTYPE html>
       placeholder="Paste YouTube, Instagram, TikTok, Twitter URL..."
       autocomplete="off" spellcheck="false"
     />
-    <button id="fetchBtn" onclick="fetchInfo()">Fetch &#x2197;</button>
+    <button id="fetchBtn" onclick="fetchInfo()">Fetch ↗</button>
   </div>
 
   <div id="status"></div>
@@ -649,31 +500,10 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="video-title" id="videoTitle"></div>
       <div class="video-sub" id="videoSub"></div>
     </div>
-    <div class="quality-label">Select Quality to Play / Download</div>
+    <div class="quality-label">Select Quality to Download</div>
     <div class="quality-grid" id="qualityGrid"></div>
   </div>
 
-</div>
-
-<!-- ── VIDEO PLAYER MODAL ── -->
-<div id="playerModal">
-  <div class="modal-inner">
-    <div class="modal-header">
-      <div class="modal-title" id="modalTitle">Loading...</div>
-      <div class="modal-actions">
-        <button class="modal-dl-btn" id="modalDlBtn" onclick="triggerDownload()">&#x2B07; Download</button>
-        <button class="modal-close" onclick="closePlayer()">&#x2715;</button>
-      </div>
-    </div>
-    <div class="modal-video-wrap" id="modalBody">
-      <div class="modal-loading" id="modalLoading">
-        <div class="big-spin"></div>
-        <span>Processing... thoda wait karo</span>
-      </div>
-      <video id="modalVideo" controls playsinline style="display:none"></video>
-      <audio id="modalAudio" controls style="display:none"></audio>
-    </div>
-  </div>
 </div>
 
 <footer>Built by <span>@MANDAL4482</span> &mdash; yt-dlp + ffmpeg + FastAPI</footer>
@@ -700,13 +530,11 @@ HTML_PAGE = """<!DOCTYPE html>
     return m+'m '+String(sec).padStart(2,'0')+'s';
   }
 
-  let currentUrl    = '';
-  let activeQuality = '';
-  let activeLabel   = '';
+  let currentUrl = '';
 
   async function fetchInfo(){
     const url = $('urlInput').value.trim();
-    if(!url){ setStatus('&#x26A0;&#xFE0F; URL daalo pehle!', true); return; }
+    if(!url){ setStatus('⚠️ URL daalo pehle!', true); return; }
     currentUrl = url;
 
     const btn = $('fetchBtn');
@@ -720,10 +548,11 @@ HTML_PAGE = """<!DOCTYPE html>
       const data = await res.json();
 
       if(!res.ok || !data.ok){
-        setStatus('&#x274C; '+(data.detail || data.error || 'URL se info nahi mili'), true);
+        setStatus('❌ '+(data.detail || data.error || 'URL se info nahi mili'), true);
         return;
       }
 
+      // Fill card
       const thumb = $('thumbnail');
       if(data.thumbnail){ thumb.src = data.thumbnail; thumb.style.display='block'; }
       else { thumb.style.display='none'; }
@@ -734,106 +563,97 @@ HTML_PAGE = """<!DOCTYPE html>
         fmtDuration(data.duration)
       ].filter(Boolean).join(' · ');
 
-      // Build quality buttons — click opens player
+      // Build quality buttons
       const grid = $('qualityGrid');
       grid.innerHTML = '';
       data.formats.forEach(f => {
         const btn = document.createElement('button');
         btn.className = 'qbtn' + (f.quality==='audio' ? ' audio' : '');
         btn.dataset.quality = f.quality;
-        btn.dataset.label   = f.label;
         const sz = fmtSize(f.filesize);
-        btn.innerHTML = '&#x25B6; ' + f.label + (sz ? '<span class="size">'+sz+'</span>' : '');
-        btn.onclick = () => openPlayer(f.quality, f.label);
+        btn.innerHTML = f.label + (sz ? `<span class="size">${sz}</span>` : '');
+        btn.onclick = () => startDownload(f.quality, btn, f.label);
         grid.appendChild(btn);
       });
 
       $('infoCard').style.display = 'block';
-      setStatus('&#x2705; '+data.formats.length+' quality options mili! Play karo ya download karo.');
+      setStatus('✅ '+data.formats.length+' quality options mili! Koi ek chunao.');
 
     }catch(e){
-      setStatus('&#x274C; Network error: '+e.message, true);
+      setStatus('❌ Network error: '+e.message, true);
     }finally{
       btn.disabled = false;
-      btn.innerHTML = 'Fetch &#x2197;';
+      btn.innerHTML = 'Fetch ↗';
     }
   }
 
-  // ── Player modal ──────────────────────────────────────────────────────────
-  function openPlayer(quality, label){
-    activeQuality = quality;
-    activeLabel   = label;
+  async function startDownload(quality, btnEl, label){
+    // Disable all buttons
+    document.querySelectorAll('.qbtn').forEach(b => {
+      b.classList.add('loading');
+      b.disabled = true;
+    });
+    btnEl.innerHTML = '<span class="spin"></span> Downloading...';
 
-    $('modalTitle').textContent = $('videoTitle').textContent;
-    $('modalLoading').style.display = 'flex';
-    $('modalLoading').innerHTML = '<div class="big-spin"></div><span>Processing... thoda wait karo</span>';
-    $('modalVideo').style.display = 'none';
-    $('modalAudio').style.display = 'none';
-    $('modalVideo').src = '';
-    $('modalAudio').src = '';
+    const bar = $('dlBar');
+    bar.style.display = 'block';
+    bar.style.width   = '5%';
 
-    $('playerModal').classList.add('open');
-    document.body.style.overflow = 'hidden';
+    setStatus(`⬇️ ${label} download ho rahi hai... browser mein save ho jayegi.`);
 
-    const streamUrl = '/stream?url='+encodeURIComponent(currentUrl)+'&quality='+encodeURIComponent(quality);
-    const isAudio   = quality === 'audio';
+    // Animate bar (fake progress — real streaming)
+    let pct = 5;
+    const timer = setInterval(()=>{
+      pct = Math.min(pct + Math.random()*4, 90);
+      bar.style.width = pct+'%';
+    }, 600);
 
-    if(isAudio){
-      const audio = $('modalAudio');
-      audio.src = streamUrl;
-      audio.oncanplay = () => {
-        $('modalLoading').style.display = 'none';
-        audio.style.display = 'block';
-        audio.play().catch(()=>{});
-      };
-      audio.onerror = () => {
-        $('modalLoading').innerHTML = '<span style="color:#ff6b6b">&#x274C; Stream load nahi hua. Download try karo.</span>';
-      };
-    } else {
-      const video = $('modalVideo');
-      video.src = streamUrl;
-      video.oncanplay = () => {
-        $('modalLoading').style.display = 'none';
-        video.style.display = 'block';
-        video.play().catch(()=>{});
-      };
-      video.onerror = () => {
-        $('modalLoading').innerHTML = '<span style="color:#ff6b6b">&#x274C; Stream load nahi hua. Download try karo.</span>';
-      };
+    try{
+      const dlUrl = `/download?url=${encodeURIComponent(currentUrl)}&quality=${encodeURIComponent(quality)}`;
+      const res   = await fetch(dlUrl);
+
+      if(!res.ok){
+        const err = await res.json().catch(()=>({detail:'Unknown error'}));
+        throw new Error(err.detail || 'Download failed');
+      }
+
+      // Stream into blob then trigger save
+      const blob = await res.blob();
+      const cd   = res.headers.get('Content-Disposition') || '';
+      const fnMatch = cd.match(/filename="?([^"]+)"?/);
+      const filename = fnMatch ? fnMatch[1] : (quality==='audio'?'audio.mp3':'video.mp4');
+
+      const a = document.createElement('a');
+      a.href  = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+
+      clearInterval(timer);
+      bar.style.width = '100%';
+      setTimeout(()=>{ bar.style.display='none'; bar.style.width='0%'; }, 800);
+      setStatus('✅ Download complete! File save ho gayi.');
+
+    }catch(e){
+      clearInterval(timer);
+      bar.style.display='none';bar.style.width='0%';
+      setStatus('❌ '+e.message, true);
     }
+
+    // Re-enable buttons
+    document.querySelectorAll('.qbtn').forEach(b => {
+      b.classList.remove('loading');
+      b.disabled = false;
+    });
+    // Restore button text
+    document.querySelectorAll('.qbtn').forEach(b => {
+      if(b.dataset.quality === quality) b.innerHTML = label;
+    });
   }
 
-  function closePlayer(){
-    $('playerModal').classList.remove('open');
-    document.body.style.overflow = '';
-    const v = $('modalVideo');
-    const a = $('modalAudio');
-    v.pause(); v.src = '';
-    a.pause(); a.src = '';
-  }
-
-  function triggerDownload(){
-    const dlUrl = '/download?url='+encodeURIComponent(currentUrl)+'&quality='+encodeURIComponent(activeQuality);
-    const a = document.createElement('a');
-    a.href = dlUrl;
-    a.download = '';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setStatus('&#x2B07;&#xFE0F; Download shuru ho gayi background mein...');
-  }
-
-  // Close modal on backdrop click
-  $('playerModal').addEventListener('click', e => {
-    if(e.target === $('playerModal')) closePlayer();
-  });
-
-  // ESC to close
-  document.addEventListener('keydown', e => {
-    if(e.key === 'Escape') closePlayer();
-  });
-
-  // Enter key on URL input
+  // Allow pressing Enter
   $('urlInput').addEventListener('keydown', e => {
     if(e.key === 'Enter') fetchInfo();
   });
