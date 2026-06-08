@@ -2,11 +2,12 @@
 """
 Universal Media Downloader — FastAPI Edition
 Developer: MANDAL !!
-Version: 3.1 — YouTube Cookie Fix + SSRF Protection
+Version: 3.2 — YouTube Fix + Auto yt-dlp Update
 """
 
-import os, re, shutil, logging, asyncio, tempfile, time, ipaddress, urllib.parse
+import os, re, shutil, logging, asyncio, tempfile, time, ipaddress, urllib.parse, subprocess, sys
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 import yt_dlp
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -16,7 +17,30 @@ from fastapi.middleware.cors import CORSMiddleware
 logging.basicConfig(level=logging.INFO, format="%(asctime)s — %(levelname)s — %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="MANDAL Downloader", version="3.1")
+
+def _update_ytdlp():
+    try:
+        logger.info("yt-dlp update check kar raha hai...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp", "-q"],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            logger.info("yt-dlp update ho gaya")
+        else:
+            logger.warning(f"yt-dlp update fail: {result.stderr[:200]}")
+    except Exception as e:
+        logger.warning(f"yt-dlp update skip: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _update_ytdlp)
+    yield
+
+
+app = FastAPI(title="MANDAL Downloader", version="3.2", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ── Cookie file path ──────────────────────────────────────────────────────────
@@ -133,10 +157,12 @@ async def get_info(url: str = Query(...)):
 
 
 def _fetch_formats(url: str) -> dict:
-    opts = _maybe_add_cookies(
-        _base_opts({"retries": 3}),
-        url,
-    )
+    extra = {"retries": 3}
+    if _is_youtube(url):
+        extra["extractor_args"] = {
+            "youtube": {"player_client": ["ios", "android", "web"]}
+        }
+    opts = _maybe_add_cookies(_base_opts(extra), url)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -238,27 +264,28 @@ async def download_video(
 
 def _blocking_download(url: str, download_dir: str, quality: str):
     extract_audio = (quality == "audio")
+    is_yt = _is_youtube(url)
 
-    ydl_opts = _maybe_add_cookies(
-        _base_opts({
-            "outtmpl": f"{download_dir}/%(title)s.%(ext)s",
-            "retries": 10,
-            "fragment_retries": 10,
-            "concurrent_fragment_downloads": 4,
-            # YouTube bot-detection workarounds
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["web", "android"],
-                    "skip": ["hls", "dash"] if not extract_audio else [],
-                }
-            },
-        }),
-        url,
-    )
+    base = {
+        "outtmpl": f"{download_dir}/%(title)s.%(ext)s",
+        "retries": 10,
+        "fragment_retries": 10,
+        "concurrent_fragment_downloads": 4,
+    }
+
+    # YouTube specific options — tries multiple clients to bypass bot detection
+    if is_yt:
+        base["extractor_args"] = {
+            "youtube": {
+                "player_client": ["ios", "android", "web"],
+            }
+        }
+
+    ydl_opts = _maybe_add_cookies(_base_opts(base), url)
 
     if extract_audio:
         ydl_opts.update({
-            "format": "bestaudio/best",
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
@@ -267,14 +294,23 @@ def _blocking_download(url: str, download_dir: str, quality: str):
         })
     else:
         h = int(quality)
-        # Progressive MP4 prefer karo (has audio already) — YouTube ke liye better
-        ydl_opts["format"] = (
-            f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]"
-            f"/bestvideo[height<={h}]+bestaudio"
-            f"/best[height<={h}][ext=mp4]"
-            f"/best[height<={h}]"
-            f"/best"
-        )
+        if is_yt:
+            # YouTube: ios client deta hai progressive streams jisme audio already hota hai
+            ydl_opts["format"] = (
+                f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]"
+                f"/bestvideo[height<={h}][ext=mp4]+bestaudio"
+                f"/bestvideo[height<={h}]+bestaudio"
+                f"/best[height<={h}][ext=mp4]"
+                f"/best[height<={h}]"
+                f"/best"
+            )
+        else:
+            ydl_opts["format"] = (
+                f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]"
+                f"/bestvideo[height<={h}]+bestaudio"
+                f"/best[height<={h}]"
+                f"/best"
+            )
         ydl_opts["merge_output_format"] = "mp4"
         ydl_opts["postprocessors"] = [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}]
 
@@ -877,7 +913,20 @@ async function fetchInfo(){
   try{
     setProg(20);
     const res=await fetch('/info?url='+encodeURIComponent(url));
-    const data=await res.json();setProg(60);
+    let data;
+    try{ data=await res.json(); }
+    catch(jsonErr){
+      const txt=await res.text().catch(()=>'');
+      if(!res.ok){
+        setStatus('❌ &nbsp;Server error ('+res.status+'): '+res.statusText,'err');
+        showToast('❌ Server error '+res.status+' — Render logs check karo','err',5000);
+      } else {
+        setStatus('❌ &nbsp;Server se invalid response mila','err');
+        showToast('❌ Invalid JSON response — server sahi se chalu nahi hua?','err',5000);
+      }
+      return;
+    }
+    setProg(60);
     if(!res.ok||!data.ok){setStatus('❌ &nbsp;'+(data.detail||data.error||'Info nahi mili'),'err');showToast('❌ '+(data.detail||data.error||'Info nahi mili'),'err');return}
     currentData=data;
     const thumb=document.getElementById('vidThumb');
@@ -916,7 +965,13 @@ async function startDownload(quality,btnEl,label){
   try{
     const dlUrl=`/download?url=${encodeURIComponent(currentUrl)}&quality=${encodeURIComponent(quality)}`;
     const res=await fetch(dlUrl);
-    if(!res.ok){const err=await res.json().catch(()=>({detail:'Unknown error'}));throw new Error(err.detail||'Download failed')}
+    if(!res.ok){
+      let errMsg='Download failed ('+res.status+')';
+      try{ const err=await res.json(); errMsg=err.detail||errMsg; }catch(e){
+        const txt=await res.text().catch(()=>''); if(txt) errMsg=txt.slice(0,120);
+      }
+      throw new Error(errMsg);
+    }
     const blob=await res.blob();
     const cd=res.headers.get('Content-Disposition')||'';
     const fnM=cd.match(/filename="?([^"]+)"?/);
