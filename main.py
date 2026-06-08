@@ -160,7 +160,10 @@ def _fetch_formats(url: str) -> dict:
     extra = {"retries": 3}
     if _is_youtube(url):
         extra["extractor_args"] = {
-            "youtube": {"player_client": ["ios", "android", "web"]}
+            "youtube": {
+                "player_client": ["tv_embedded", "android", "ios", "web"],
+                "formats": "missing_pot",
+            }
         }
     opts = _maybe_add_cookies(_base_opts(extra), url)
     try:
@@ -273,11 +276,14 @@ def _blocking_download(url: str, download_dir: str, quality: str):
         "concurrent_fragment_downloads": 4,
     }
 
-    # YouTube specific options — tries multiple clients to bypass bot detection
+    # YouTube 2026: SABR bypass — tv_embedded + missing_pot is most reliable
     if is_yt:
         base["extractor_args"] = {
             "youtube": {
-                "player_client": ["ios", "android", "web"],
+                # tv_embedded aur android ke paas SABR restriction nahi hoti
+                "player_client": ["tv_embedded", "android", "ios", "web"],
+                # missing_pot: PO Token na hone pe bhi formats try karo
+                "formats": "missing_pot",
             }
         }
 
@@ -295,14 +301,16 @@ def _blocking_download(url: str, download_dir: str, quality: str):
     else:
         h = int(quality)
         if is_yt:
-            # YouTube: ios client deta hai progressive streams jisme audio already hota hai
+            # YouTube 2026: SABR streaming ne separate streams tod diye hain.
+            # Format 18 (360p combined) aur format 22 (720p combined) sabse reliable hain.
+            # missing_pot se skipped formats bhi try hote hain.
+            # Pehle combined mp4 try karo, phir merge karo, last resort best.
             ydl_opts["format"] = (
-                f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]"
-                f"/bestvideo[height<={h}][ext=mp4]+bestaudio"
-                f"/bestvideo[height<={h}]+bestaudio"
-                f"/best[height<={h}][ext=mp4]"
-                f"/best[height<={h}]"
-                f"/best"
+                f"best[height<={h}][ext=mp4]"           # combined mp4 — most stable
+                f"/best[height<={h}]"                   # combined any ext
+                f"/bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]"  # merge fallback
+                f"/bestvideo[height<={h}]+bestaudio"    # merge any
+                f"/best"                                # last resort
             )
         else:
             ydl_opts["format"] = (
